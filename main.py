@@ -57,7 +57,7 @@ from signal_processing import parse_ppg_packet as _parse_ppg_pkt
 # ============================================================================
 # 全局配置
 # ============================================================================
-FS = 250                     # 采样率 (Hz) — 与 kai4.csv 一致
+FS = 200                     # 采样率 (Hz) — 与 MCU 一致 (原250，降为200留余量)
 PPG_FS = 100                    # PPG 采样率 (Hz)
 MODEL_WINDOW_SEC = 32           # cNIBP 模型输入窗口 (秒)
 ECG_PACKET_LEN = 16             # 0xAA ECG 包长度
