@@ -735,7 +735,25 @@ canvas.wave-canvas {
           }
         }
         if (data.r_peaks && data.r_peaks.indices && data.r_peaks.indices.length > 0) {
-          lastRPeaks = data.r_peaks;
+          // Merge new R-peaks with existing ones (don't overwrite)
+          // Cross-batch: keep old peaks until they naturally scroll out of view
+          if (!lastRPeaks || lastRPeaks.indices.length === 0) {
+            lastRPeaks = data.r_peaks;
+          } else {
+            // Only add peaks not already in the existing list
+            for (let j = 0; j < data.r_peaks.indices.length; j++) {
+              if (!lastRPeaks.indices.includes(data.r_peaks.indices[j])) {
+                lastRPeaks.indices.push(data.r_peaks.indices[j]);
+                lastRPeaks.amplitudes.push(data.r_peaks.amplitudes[j]);
+              }
+            }
+            // Prune peaks older than 6 seconds (1250*6 = 7500 samples back)
+            const cutoff = Math.max(0, procData.length - 1250 * 6);
+            while (lastRPeaks.indices.length > 0 && lastRPeaks.indices[0] < cutoff) {
+              lastRPeaks.indices.shift();
+              lastRPeaks.amplitudes.shift();
+            }
+          }
         }
 
         // 状态栏更新
