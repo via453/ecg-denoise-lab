@@ -918,13 +918,13 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         batch_proc = batch_playback[batch_playback_pos:end].tolist()
                         batch_playback_pos = end
                         total_sent_samples += len(batch_proc)
-                        # 只发送当前数据块范围内的R峰（用块内相对索引）
+                        # 只发送当前块内的R峰（用procData绝对索引，前端可见性自动过滤）
                         chunk_start = batch_playback_pos - len(batch_proc)
                         r_peak_indices = []
                         r_peak_amps = []
                         for pi, pa in zip(batch_r_peaks, batch_r_amps):
                             if chunk_start <= pi < chunk_start + len(batch_proc):
-                                r_peak_indices.append(pi - chunk_start)
+                                r_peak_indices.append(batch_start_in_procdata + pi)
                                 r_peak_amps.append(pa)
 
                     # 检测信号是否存活
