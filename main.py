@@ -905,8 +905,8 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                                 batch_playback_pos = 0
                                 batch_start_in_procdata = total_sent_samples
                                 pks, amps = batch_detect_r_peaks(batch_playback, FS)
-                                # R峰存为绝对索引（batch_start偏移 + 批次内位置）
-                                batch_r_peaks = [batch_start_in_procdata + int(i) for i in pks]
+                                # R峰存为批次内相对位置（发送时再转块内相对）
+                                batch_r_peaks = [int(i) for i in pks]
                                 batch_r_amps = [float(a) for a in amps]
                                 n_peaks = len(batch_r_peaks)
                                 last_sent_version = batch_version
@@ -918,9 +918,14 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         batch_proc = batch_playback[batch_playback_pos:end].tolist()
                         batch_playback_pos = end
                         total_sent_samples += len(batch_proc)
-                        # 发送当前批次的所有R峰（前端可见性检查会自动过滤）
-                        r_peak_indices = batch_r_peaks[:]
-                        r_peak_amps = batch_r_amps[:]
+                        # 只发送当前数据块范围内的R峰（用块内相对索引）
+                        chunk_start = batch_playback_pos - len(batch_proc)
+                        r_peak_indices = []
+                        r_peak_amps = []
+                        for pi, pa in zip(batch_r_peaks, batch_r_amps):
+                            if chunk_start <= pi < chunk_start + len(batch_proc):
+                                r_peak_indices.append(pi - chunk_start)
+                                r_peak_amps.append(pa)
 
                     # 检测信号是否存活
                     signal_alive = float(np.max(np.abs(raw_vis[-FS:]))) > 0.01 if len(raw_vis) >= FS else True
