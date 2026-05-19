@@ -334,6 +334,13 @@ canvas.wave-canvas {
       </div>
       <canvas class="wave-canvas" id="canvasProc"></canvas>
     </div>
+    <div class="wave-card">
+      <div class="wave-card-header">
+        <span class="label" style="color:#3b82f6">● PPG (Photoplethysmogram)</span>
+        <span class="badge" id="ppgLevel">--</span>
+      </div>
+      <canvas class="wave-canvas" id="canvasPpg"></canvas>
+    </div>
   </div>
 
   <!-- 控制面板 -->
@@ -356,6 +363,39 @@ canvas.wave-canvas {
         自动选择8种方法中的最优结果<br>
         每10秒窗口分析一次
       </div>
+    </div>
+
+    <!-- 生命体征 Vitals -->
+    <div class="control-section">
+      <h3>生命体征 Vitals</h3>
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="num blue" id="spo2Display">--</div>
+          <div class="lbl">SpO₂ (%)</div>
+        </div>
+        <div class="stat-box">
+          <div class="num cyan" id="tempDisplay">--</div>
+          <div class="lbl">体温 (℃)</div>
+        </div>
+      </div>
+    </div>
+    <div class="control-section">
+      <h3>连续血压 cNIBP (mmHg)</h3>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;text-align:center;">
+          <div class="value" style="color:var(--accent-cyan);font-size:36px;" id="sbpDisplay">--</div>
+          <div class="label">SBP 收缩压</div>
+        </div>
+        <div style="flex:1;text-align:center;">
+          <div class="value" style="color:var(--accent-green);font-size:36px;" id="dbpDisplay">--</div>
+          <div class="label">DBP 舒张压</div>
+        </div>
+        <div style="flex:1;text-align:center;">
+          <div class="value" style="color:var(--accent-gray);font-size:36px;" id="mapDisplay">--</div>
+          <div class="label">MAP 平均压</div>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;">每32秒更新一次</div>
     </div>
 
     <!-- 实时统计 -->
@@ -436,6 +476,8 @@ canvas.wave-canvas {
   const canvasProc = document.getElementById('canvasProc');
   const ctxRaw = canvasRaw.getContext('2d');
   const ctxProc = canvasProc.getContext('2d');
+  const canvasPpg = document.getElementById('canvasPpg');
+  const ctxPpg = canvasPpg.getContext('2d');
 
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
@@ -469,6 +511,7 @@ canvas.wave-canvas {
   function resizeAll() {
     resizeCanvas(canvasRaw);
     resizeCanvas(canvasProc);
+    resizeCanvas(canvasPpg);
   }
 
   window.addEventListener('resize', resizeAll);
@@ -500,6 +543,7 @@ canvas.wave-canvas {
   // ============================================================
   const rawData = [];
   const procData = [];
+  const ppgData = [];
 
   function pushRawData(arr, data) {
     // 替换模式：原始信号实时刷新
@@ -655,6 +699,9 @@ canvas.wave-canvas {
     // 绘制去噪信号（亮绿色）
     drawWaveform(ctxProc, procData, '#22c55e', null, null, 'Denoised');
 
+    // 绘制 PPG 信号（蓝色）
+    drawWaveform(ctxPpg, ppgData, '#3b82f6', null, null, 'PPG');
+
     document.getElementById('zoomDisplay').textContent = 
         Math.round(ampZoom * 100) + '% / ' + Math.round(timeZoom * 100) + '%';
 
@@ -725,6 +772,20 @@ canvas.wave-canvas {
         // 仅当有新批次数据时才追加（实现滚动刷新）
         if (data.proc && data.proc.length > 0) {
           pushProcData(procData, data.proc);
+        }
+        if (data.ppg && data.ppg.length > 0) {
+          pushProcData(ppgData, data.ppg);
+        }
+        if (data.temp !== undefined) {
+          document.getElementById('tempDisplay').textContent = data.temp.toFixed(1);
+        }
+        if (data.spo2 !== undefined) {
+          document.getElementById('spo2Display').textContent = data.spo2;
+        }
+        if (data.cNIBP && data.cNIBP.sbp) {
+          document.getElementById('sbpDisplay').textContent = data.cNIBP.sbp.toFixed(0);
+          document.getElementById('dbpDisplay').textContent = data.cNIBP.dbp.toFixed(0);
+          document.getElementById('mapDisplay').textContent = data.cNIBP.map.toFixed(0);
         }
         if (data.metrics) {
           lastMetrics = data.metrics;

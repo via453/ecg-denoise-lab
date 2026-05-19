@@ -28,6 +28,7 @@ import struct
 import sys
 import threading
 import time
+import random
 import numpy as np
 from flask import Flask, Response, jsonify, render_template_string
 from scipy import signal as scipy_signal
@@ -43,9 +44,25 @@ except ImportError:
 import serial
 
 # ============================================================================
+# ABPImputation 模型与信号处理
+# ============================================================================
+import sys as _sys
+_ABP_ROOT = r'G:\ABPImputation'
+if _ABP_ROOT not in _sys.path:
+    _sys.path.insert(0, _ABP_ROOT)
+
+from signal_processing import parse_ecg_packet as _parse_ecg_pkt
+from signal_processing import parse_ppg_packet as _parse_ppg_pkt
+
+# ============================================================================
 # 全局配置
 # ============================================================================
 FS = 250                     # 采样率 (Hz) — 与 kai4.csv 一致
+PPG_FS = 100                    # PPG 采样率 (Hz)
+MODEL_WINDOW_SEC = 32           # cNIBP 模型输入窗口 (秒)
+ECG_PACKET_LEN = 16             # 0xAA ECG 包长度
+PPG_PACKET_LEN = 17             # 0xBB PPG 包长度
+TEMP_PACKET_LEN = 5             # 0xCC TEMP 包长度
 WINDOW_SIZE = 128             # FFT 窗口大小（~0.5s，平衡延迟与分辨率）
 HOP_SIZE = 8                  # 每次处理的步进（~32ms 更新一次）
 FILTER_LOW = 0.5              # 带通下限 (Hz)
@@ -666,6 +683,28 @@ class SimulatedECG:
 
         return output
 
+    def generate_ppg(self, n_samples):
+        """生成模拟 PPG 信号（100Hz 速率，与 ECG 同时间基准）。"""
+        output = []
+        for _ in range(n_samples):
+            t = self.t
+            beat_t = self.next_beat_time
+            dt = t - beat_t
+            if dt < 0:
+                dt = t - (beat_t - 60.0 / self.base_hr)
+            ppg = 0.0
+            if 0 < dt < 0.3:
+                ppg = 0.5 * (1 - math.cos(2 * math.pi * dt / 0.3))
+            elif 0.3 <= dt < 0.5:
+                ppg = 0.5 * math.exp(-3 * (dt - 0.3))
+            noise = self.noise_level * 0.05 * random.random()
+            output.append(ppg + noise)
+            self.t += 1.0 / PPG_FS
+        return output
+
+    def get_temp(self):
+        return 36.5 + 0.3 * math.sin(2 * math.pi * self.t / 60)
+
 
 # ============================================================================
 # 串口读取器 (pyserial)
@@ -698,46 +737,57 @@ class SerialReader:
         except serial.SerialException as e:
             raise IOError(f"无法打开串口 {self.port}，错误: {e}")
 
-    def read_packet(self, timeout=5.0):
+    def read_frame(self):
         """
-        读取 F1 工程的 13 字节二进制 ECG 数据包。
-        协议:
-          Bytes 0-1:  0xAA 0xAA (帧头)
-          Bytes 2-7:  填充/未使用
-          Bytes 8-11: 32位有符号整数, 大端序 (ADC 原始值)
-          Byte 12:    校验和 = sum(bytes[0:12]) & 0xFF
-        返回: float (mV, 经 gain=1/1000 转换) 或 None (超时/错误)
+        读取 V4 三通道协议帧。
+        返回: dict or None
+          ecg:  {'type':'ecg', 'value':mV, 'timestamp':ms}
+          ppg:  {'type':'ppg', 'ir':int, 'red':int, 'timestamp':ms}
+          temp: {'type':'temp', 'value':°C}
         """
-        start = time.time()
-        while time.time() - start < timeout:
-            # 扫描 0xAA 0xAA 帧头
-            while len(self.buffer) >= 2:
-                if self.buffer[0] == 0xAA and self.buffer[1] == 0xAA:
-                    break
-                self.buffer = self.buffer[1:]
+        hdr = self.ser.read(1) if self.ser else b''
+        if not hdr:
+            return None
+        b = hdr[0]
 
-            if len(self.buffer) >= 13:
-                packet = self.buffer[:13]
-                # 校验和验证
-                if sum(packet[:12]) & 0xFF != packet[12]:
-                    self.buffer = self.buffer[1:]
-                    continue
-                # 解析大端 32 位有符号整数 (bytes 8-11)
-                raw_val = struct.unpack('>i', packet[8:12])[0]
-                ecg_mv = raw_val * (1.0 / 1000)
-                self.buffer = self.buffer[13:]
-                return ecg_mv
+        if b == 0xAA:  # ECG 16B
+            rest = self.ser.read(ECG_PACKET_LEN - 1)
+            if len(rest) < ECG_PACKET_LEN - 1:
+                return None
+            pkt = hdr + rest
+            c = 0
+            for x in pkt[:ECG_PACKET_LEN-1]:
+                c ^= x
+            if c != pkt[ECG_PACKET_LEN-1]:
+                return None
+            uV = struct.unpack('>i', pkt[4:8])[0]
+            ts_ms = struct.unpack('>I', pkt[11:15])[0]
+            return {'type': 'ecg', 'value': uV / 1000.0, 'timestamp': ts_ms}
 
-            # 读取更多数据
-            if self.ser and self.ser.is_open:
-                try:
-                    data = self.ser.read(256)
-                    if data:
-                        self.buffer += data
-                except Exception:
-                    time.sleep(0.005)
-            else:
-                time.sleep(0.005)
+        elif b == 0xBB:  # PPG 17B
+            rest = self.ser.read(PPG_PACKET_LEN - 1)
+            if len(rest) < PPG_PACKET_LEN - 1:
+                return None
+            pkt = hdr + rest
+            c = 0
+            for x in pkt[:PPG_PACKET_LEN-1]:
+                c ^= x
+            if c != pkt[PPG_PACKET_LEN-1]:
+                return None
+            ir = struct.unpack('>I', pkt[4:8])[0]
+            red = struct.unpack('>I', pkt[8:12])[0]
+            ts_ms = struct.unpack('>I', pkt[12:16])[0]
+            return {'type': 'ppg', 'ir': ir, 'red': red, 'timestamp': ts_ms}
+
+        elif b == 0xCC:  # TEMP 5B
+            rest = self.ser.read(TEMP_PACKET_LEN - 1)
+            if len(rest) < TEMP_PACKET_LEN - 1:
+                return None
+            pkt = hdr + rest
+            if (pkt[0] ^ pkt[1] ^ pkt[2] ^ pkt[3]) != pkt[4]:
+                return None
+            raw = struct.unpack('>h', pkt[2:4])[0]
+            return {'type': 'temp', 'value': raw / 100.0}
 
         return None
 
@@ -826,25 +876,58 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
     BATCH_SIZE = int(FS * 10)  # 10秒 = 2500样本
     BATCH_INTERVAL = 5.0       # 每5秒触发一次分析
 
+    # ---- V4 多通道缓冲 ----
+    from collections import deque
+    ecg_ts_buffer = deque(maxlen=FS * 60)      # 60秒 ECG (ts, mV)
+    ppg_ts_buffer = deque(maxlen=PPG_FS * 60)   # 60秒 PPG (ts, value)
+    g_latest_temp = 20.0                        # 最新体温
+    g_latest_spo2 = 98                          # 最新SpO2
+    last_model_time = 0                         # 上次模型推理时间
+    model_results = None                        # 缓存模型结果
+    model_lock = threading.Lock()
+
     try:
         while True:
             try:
                 # ---- 读取样本 ----
                 if mode == 'serial' and reader:
                     try:
-                        value = reader.read_packet(timeout=0.5)
+                        frame = reader.read_frame()
                     except Exception as e:
                         print(f"  [错误] 串口读取异常: {e}")
                         time.sleep(0.01)
                         continue
-                    if value is None:
+                    if frame is None:
                         time.sleep(0.001)
                         continue
-                    new_samples = [value]
+                    ts_now = time.time()
+                    if frame['type'] == 'ecg':
+                        ecg_ts_buffer.append((frame.get('timestamp', ts_now), frame['value']))
+                        new_samples = [frame['value']]
+                    elif frame['type'] == 'ppg':
+                        ppg_ts_buffer.append((frame.get('timestamp', ts_now), frame['ir']))
+                        new_samples = []
+                        g_latest_spo2 = 98
+                    elif frame['type'] == 'temp':
+                        g_latest_temp = frame['value']
+                        new_samples = []
+                    else:
+                        new_samples = []
                 else:
-                    # 模拟模式：按批次生成（每次生成 hop_size 个样本，模拟实时采集）
+                    # 模拟模式：同时生成 ECG + PPG
                     new_samples = simulator.generate(HOP_SIZE)
-                    time.sleep(HOP_SIZE / FS)  # 模拟250Hz实时速率
+                    ts_sim = time.time()
+                    for v in new_samples:
+                        ecg_ts_buffer.append((ts_sim, v))
+                    ppg_out = simulator.generate_ppg(max(1, HOP_SIZE // 3))
+                    for v in ppg_out:
+                        ppg_ts_buffer.append((ts_sim, v))
+                    g_latest_temp = simulator.get_temp()
+                    time.sleep(HOP_SIZE / FS)
+
+                if not new_samples:
+                    time.sleep(0.001)
+                    continue
 
                 # ---- 写入原始缓冲区 ----
                 raw_buffer.extend(new_samples)
@@ -877,6 +960,27 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                             print(f"  [批处理] 错误: {e}")
                     t = threading.Thread(target=run_batch, args=(current_batch,), daemon=True)
                     t.start()
+
+                # ---- V4 模型推理（每32秒） ----
+                if (len(ecg_ts_buffer) >= MODEL_WINDOW_SEC * FS
+                        and len(ppg_ts_buffer) >= MODEL_WINDOW_SEC * PPG_FS
+                        and time.time() - last_model_time >= MODEL_WINDOW_SEC):
+                    last_model_time = time.time()
+                    def run_model():
+                        nonlocal model_results
+                        try:
+                            ecg_32s = np.array([v for _, v in list(ecg_ts_buffer)[-MODEL_WINDOW_SEC*FS:]])
+                            ppg_32s = np.array([v for _, v in list(ppg_ts_buffer)[-MODEL_WINDOW_SEC*PPG_FS:]])
+                            from abp_sensor_bridge import process_sensor_data
+                            sbp, dbp, map_val, wf = process_sensor_data(ecg_32s, ppg_32s, 120, 80)
+                            with model_lock:
+                                model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1), 'map': round(map_val,1), 'waveform': wf.tolist()[:500]}
+                            print(f"  [模型] cNIBP: SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}")
+                        except Exception as e:
+                            print(f"  [模型] 错误: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    threading.Thread(target=run_model, daemon=True).start()
 
                 # ---- SSE 推送（按时间间隔） ----
                 now = time.time()
@@ -918,17 +1022,16 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         batch_proc = batch_playback[batch_playback_pos:end].tolist()
                         batch_playback_pos = end
                         total_sent_samples += len(batch_proc)
-                        # 只发送当前块内的R峰（用procData绝对索引，前端可见性自动过滤）
-                        chunk_start = batch_playback_pos - len(batch_proc)
-                        r_peak_indices = []
-                        r_peak_amps = []
-                        for pi, pa in zip(batch_r_peaks, batch_r_amps):
-                            if chunk_start <= pi < chunk_start + len(batch_proc):
-                                r_peak_indices.append(batch_start_in_procdata + pi)
-                                r_peak_amps.append(pa)
+                        # 发送当前批次全部R峰（procData绝对索引，前端自动过滤可视范围）
+                        r_peak_indices = [batch_start_in_procdata + pi for pi in batch_r_peaks]
+                        r_peak_amps = batch_r_amps[:]
 
                     # 检测信号是否存活
                     signal_alive = float(np.max(np.abs(raw_vis[-FS:]))) > 0.01 if len(raw_vis) >= FS else True
+
+                    # 获取模型结果
+                    with model_lock:
+                        cNIBP = model_results
 
                     packet = {
                         'raw': raw_vis[-min(vis_n, len(raw_vis)):],
@@ -941,6 +1044,10 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         'method': method_name,
                         't_start': now - vis_n / FS,
                         't_end': now,
+                        'ppg': [v for _, v in list(ppg_ts_buffer)[-int(PPG_FS * 5):]],
+                        'temp': round(g_latest_temp, 1),
+                        'spo2': g_latest_spo2,
+                        'cNIBP': cNIBP,
                         'metrics': {
                             'heart_rate': hr_bpm,
                             'peak_snr': batch_snr,
@@ -1083,7 +1190,7 @@ def main():
     baud = args.baud
 
     print("=" * 60)
-    print("  实时 ECG 去噪服务器")
+    print("  ECG+PPG+TEMP Monitor")
     print("=" * 60)
     print(f"  模式: {mode}")
     if args.port:
