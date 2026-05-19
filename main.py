@@ -59,7 +59,7 @@ from signal_processing import parse_ppg_packet as _parse_ppg_pkt
 # ============================================================================
 # 全局配置
 # ============================================================================
-FS = 200                     # 采样率 (Hz) — 与 MCU 一致 (原250，降为200留余量)
+FS = 250                     # 采样率 (Hz) — 与 MCU 一致 (MCU 固定 250Hz)
 PPG_FS = 100                    # PPG 采样率 (Hz)
 MODEL_WINDOW_SEC = 32           # cNIBP 模型输入窗口 (秒)
 ECG_PACKET_LEN = 16             # 0xAA ECG 包长度
@@ -973,10 +973,8 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         try:
                             ecg_32s = np.array([v for _, v in list(ecg_ts_buffer)[-MODEL_WINDOW_SEC*FS:]])
                             ppg_32s = np.array([v for _, v in list(ppg_ts_buffer)[-MODEL_WINDOW_SEC*PPG_FS:]])
-                            # 模型期望 ECG 为 250Hz，从 200Hz 重采样
-                            ecg_250hz = scipy_signal.resample(ecg_32s, int(len(ecg_32s) * 250 / FS))
                             from abp_sensor_bridge import process_sensor_data
-                            sbp, dbp, map_val, wf = process_sensor_data(ecg_250hz, ppg_32s, 120, 80)
+                            sbp, dbp, map_val, wf = process_sensor_data(ecg_32s, ppg_32s, 120, 80)
                             with model_lock:
                                 model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1), 'map': round(map_val,1), 'waveform': wf.tolist()[:500]}
                             print(f"  [模型] cNIBP: SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}")
