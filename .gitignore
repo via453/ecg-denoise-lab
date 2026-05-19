@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+server_out.log
+server_err.log
+.versions/
+.sisyphus/

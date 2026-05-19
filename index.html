@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时 ECG 去噪监控</title>
+<style>
+/* ============================================================
+   全局样式 — 医用暗色主题
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-primary: #0a0e17;
+  --bg-panel: #111827;
+  --bg-card: #1a1f2e;
+  --border: #2a3040;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --accent-green: #22c55e;
+  --accent-blue: #3b82f6;
+  --accent-cyan: #06b6d4;
+  --accent-gray: #64748b;
+  --accent-red: #ef4444;
+  --accent-yellow: #eab308;
+  --font-mono: 'Consolas', 'Courier New', monospace;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ============================================================
+   顶部状态栏
+   ============================================================ */
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 20px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  height: 44px;
+}
+
+.status-bar .title {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+
+.status-bar .title span { color: var(--accent-cyan); }
+
+.status-items {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.online  { background: var(--accent-green); box-shadow: 0 0 6px var(--accent-green); }
+.status-dot.offline { background: var(--accent-red); }
+.status-dot.paused  { background: var(--accent-yellow); }
+
+/* ============================================================
+   主布局
+   ============================================================ */
+.main-layout {
+  display: flex;
+  height: calc(100vh - 44px);
+}
+
+/* ---- 波形面板 ---- */
+.wave-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wave-card {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+}
+
+.wave-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: rgba(0,0,0,0.3);
+  border-bottom: 1px solid var(--border);
+}
+
+.wave-card-header .label { text-transform: uppercase; }
+.wave-card-header .label.raw  { color: var(--accent-gray); }
+.wave-card-header .label.proc { color: var(--accent-green); }
+
+.wave-card-header .badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.06);
+  color: var(--text-secondary);
+}
+
+canvas.wave-canvas {
+  display: block;
+  width: 100%;
+  height: calc(100% - 28px);
+}
+
+/* ---- 右侧控制面板 ---- */
+.control-panel {
+  width: 260px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.control-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.control-section .value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1.2;
+}
+
+.control-section .value.green  { color: var(--accent-green); }
+.control-section .value.blue   { color: var(--accent-blue); }
+.control-section .value.cyan   { color: var(--accent-cyan); }
+.control-section .value.gray   { color: var(--accent-gray); }
+.control-section .value.red    { color: var(--accent-red); }
+
+.control-section .label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 方法选择按钮组 */
+.method-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.method-btn {
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+
+.method-btn:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: var(--accent-cyan);
+}
+
+.method-btn.active {
+  background: rgba(6,182,212,0.12);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
+
+.method-btn .desc {
+  display: block;
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  font-weight: 400;
+}
+
+/* 统计数据网格 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.stat-box {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.stat-box .num {
+  font-size: 16px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.stat-box .lbl {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+
+/* 串口配置 */
+.serial-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.serial-config input,
+.serial-config select {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.serial-config input:focus,
+.serial-config select:focus {
+  border-color: var(--accent-cyan);
+}
+
+.serial-config label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* 滚动条 */
+.control-panel::-webkit-scrollbar { width: 4px; }
+.control-panel::-webkit-scrollbar-track { background: transparent; }
+.control-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* 响应式 */
+@media (max-width: 800px) {
+  .control-panel { width: 200px; }
+  .stat-grid { grid-template-columns: 1fr; }
+  .status-items .status-item.hide-mobile { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     状态栏
+     ============================================================ -->
+<div class="status-bar">
+  <div class="title"><span>ECG</span> Monitor</div>
+  <div class="status-items">
+    <div class="status-item">
+      <span class="status-dot offline" id="statusDot"></span>
+      <span id="statusText">连接中...</span>
+    </div>
+    <div class="status-item hide-mobile">
+      采样率: <span id="fpsDisplay">-</span> Hz
+    </div>
+    <div class="status-item hide-mobile">
+      已接收: <span id="samplesDisplay">0</span>
+    </div>
+    <div class="status-item">
+      模式: <span id="modeDisplay">-</span>
+    </div>
+    <div class="status-item hide-mobile">
+      缩放: <span id="zoomDisplay">100% / 100%</span> <span style="font-size:10px;color:var(--text-secondary)">(幅值/时基)</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     主布局
+     ============================================================ -->
+<div class="main-layout">
+
+  <!-- 波形面板 -->
+  <div class="wave-panel">
+    <div class="wave-card">
+      <div class="wave-card-header">
+        <span class="label raw">● 原始信号 (Raw)</span>
+        <span class="badge" id="rawLevel">RMS: -</span>
+      </div>
+      <canvas class="wave-canvas" id="canvasRaw"></canvas>
+    </div>
+    <div class="wave-card">
+      <div class="wave-card-header">
+        <span class="label proc">● 去噪后 (Denoised)</span>
+        <span class="badge" id="procLevel">Method: waiting for batch...</span>
+      </div>
+      <canvas class="wave-canvas" id="canvasProc"></canvas>
+    </div>
+  </div>
+
+  <!-- 控制面板 -->
+  <div class="control-panel">
+
+    <!-- 心率 -->
+    <div class="control-section">
+      <h3>心率 Heart Rate</h3>
+      <div class="value green" id="hrDisplay">--</div>
+      <div class="label">bpm (每分钟心跳)</div>
+    </div>
+
+    <!-- 去噪方法 -->
+    <div class="control-section">
+      <h3>当前方法 Current Method</h3>
+      <div id="currentMethodDisplay" style="font-size:24px;font-weight:700;font-family:var(--font-mono);color:var(--accent-cyan);padding:8px 0;">
+        collecting...
+      </div>
+      <div style="font-size:11px;color:var(--text-secondary);">
+        自动选择8种方法中的最优结果<br>
+        每10秒窗口分析一次
+      </div>
+    </div>
+
+    <!-- 实时统计 -->
+    <div class="control-section">
+      <h3>实时统计 Statistics</h3>
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="num cyan" id="statSnr">--</div>
+          <div class="lbl">Peak SNR (dB)</div>
+        </div>
+        <div class="stat-box">
+          <div class="num blue" id="statLevel">--</div>
+          <div class="lbl">信号强度 (mV)</div>
+        </div>
+        <div class="stat-box">
+          <div class="num" id="statPeaks" style="color:var(--accent-yellow)">--</div>
+          <div class="lbl">检测 R 峰数</div>
+        </div>
+        <div class="stat-box">
+          <div class="num gray" id="statStatus">--</div>
+          <div class="lbl">信号状态</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 串口配置 -->
+    <div class="control-section">
+      <h3>连接设置</h3>
+      <div class="serial-config">
+        <div style="display:flex;gap:6px;align-items:end;">
+          <div style="flex:1;">
+            <label>端口 Port</label>
+            <input type="text" id="portInput" value="COM37" style="width:100%;">
+          </div>
+          <div style="width:90px;">
+            <label>波特率</label>
+            <select id="baudSelect" style="width:100%;">
+              <option>9600</option>
+              <option>19200</option>
+              <option>38400</option>
+              <option>57600</option>
+              <option selected>115200</option>
+              <option>230400</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:10px;color:var(--text-secondary);padding:4px 0;">
+          💡 重启服务时使用: <code>--port COM37 --baud 115200</code>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================
+     JavaScript — Canvas 波形渲染 + SSE 连接
+     ============================================================ -->
+<script>
+(function() {
+  'use strict';
+
+  // ============================================================
+  // 配置
+  // ============================================================
+  const FS = 250;              // 采样率（与后端一致）
+  const VISIBLE_SEC = 5;       // 可见时间窗口
+  const MAX_POINTS = VISIBLE_SEC * FS;  // 最多 1250 点
+  let ampZoom = 1.0;       // 垂直（幅值）缩放
+  let timeZoom = 1.0;      // 水平（时基）缩放
+  const MIN_ZOOM = 0.1;
+  const MAX_ZOOM = 20.0;
+
+  // ============================================================
+  // DOM 引用
+  // ============================================================
+  const canvasRaw = document.getElementById('canvasRaw');
+  const canvasProc = document.getElementById('canvasProc');
+  const ctxRaw = canvasRaw.getContext('2d');
+  const ctxProc = canvasProc.getContext('2d');
+
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const fpsDisplay = document.getElementById('fpsDisplay');
+  const samplesDisplay = document.getElementById('samplesDisplay');
+  const modeDisplay = document.getElementById('modeDisplay');
+
+  const hrDisplay = document.getElementById('hrDisplay');
+  const rawLevel = document.getElementById('rawLevel');
+  const procLevel = document.getElementById('procLevel');
+  const statSnr = document.getElementById('statSnr');
+  const statLevel = document.getElementById('statLevel');
+  const statPeaks = document.getElementById('statPeaks');
+  const statStatus = document.getElementById('statStatus');
+
+  // ============================================================
+  // Canvas 尺寸管理
+  // ============================================================
+  function resizeCanvas(canvas) {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const w = rect.width;
+    const h = canvas.parentElement.clientHeight - 28; // 减去 header
+    if (w > 0 && h > 20) {
+      canvas.width = Math.round(w * devicePixelRatio);
+      canvas.height = Math.round(h * devicePixelRatio);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+    }
+  }
+
+  function resizeAll() {
+    resizeCanvas(canvasRaw);
+    resizeCanvas(canvasProc);
+  }
+
+  window.addEventListener('resize', resizeAll);
+  new ResizeObserver(resizeAll).observe(document.querySelector('.wave-panel'));
+
+  // 鼠标滚轮缩放（双画布同步）
+  function handleWheel(e) {
+    e.preventDefault();
+    const delta = Math.sign(e.deltaY);
+    if (e.shiftKey) {
+      // 时基缩放（水平）
+      timeZoom *= (delta < 0) ? 0.85 : (1 / 0.85);
+      timeZoom = Math.max(0.2, Math.min(10, timeZoom));
+    } else {
+      // 幅值缩放（垂直）
+      ampZoom *= (delta < 0) ? 0.85 : (1 / 0.85);
+      ampZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, ampZoom));
+    }
+  }
+  canvasRaw.addEventListener('wheel', handleWheel, { passive: false });
+  canvasProc.addEventListener('wheel', handleWheel, { passive: false });
+
+  function resetZoom() { ampZoom = 1.0; timeZoom = 1.0; }
+  canvasRaw.addEventListener('dblclick', resetZoom);
+  canvasProc.addEventListener('dblclick', resetZoom);
+
+  // ============================================================
+  // 数据缓冲区
+  // ============================================================
+  const rawData = [];
+  const procData = [];
+
+  function pushRawData(arr, data) {
+    // 替换模式：原始信号实时刷新
+    arr.length = 0;
+    for (const v of data) {
+      arr.push(v);
+    }
+  }
+
+  function pushProcData(arr, data) {
+    // 追加模式：去噪信号滚动刷新
+    for (const v of data) {
+      arr.push(v);
+    }
+    // 限制缓冲区大小（最多20秒）
+    const MAX_PROC = MAX_POINTS * 4;
+    while (arr.length > MAX_PROC * 2) {
+      arr.splice(0, arr.length - MAX_PROC);
+    }
+  }
+
+  // ============================================================
+  // Canvas 波形绘制
+  // ============================================================
+  function drawWaveform(ctx, data, color, yMin, yMax, label) {
+    const w = canvasRaw.width;   // device pixel size
+    const h = canvasRaw.height;
+    const dpr = devicePixelRatio;
+    const cssW = w / dpr;
+    const cssH = h / dpr;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 绘制网格
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
+    // 水平网格线
+    const nHoriz = 5;
+    for (let i = 0; i <= nHoriz; i++) {
+      const y = (i / nHoriz) * h;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+    // 垂直网格线（1 秒间隔，随水平缩放调整）
+    const visSec = VISIBLE_SEC / timeZoom;
+    const secPixels = cssW / visSec;
+    const nGrid = Math.floor(visSec);
+    for (let s = 1; s <= nGrid; s++) {
+      const x = s * secPixels * dpr;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+
+    if (!data || data.length < 2) {
+      // 无数据提示
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.font = `${14 * dpr}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('等待数据...', w / 2, h / 2);
+      return;
+    }
+
+    // 取数据（考虑时基缩放）
+    const visiblePoints = Math.round(MAX_POINTS / timeZoom);
+    const display = data.slice(-Math.min(visiblePoints, data.length));
+    const n = display.length;
+    const nTotal = Math.min(visiblePoints, data.length);
+    if (n < 2) return;
+
+    // 自动 Y 轴范围（带 padding）+ 幅值缩放
+    const padding = 0.15;
+    let autoMin = Math.min(...display);
+    let autoMax = Math.max(...display);
+    let range = autoMax - autoMin;
+    if (range < 0.001) { autoMin -= 0.5; autoMax += 0.5; range = autoMax - autoMin; }
+    const center = (autoMin + autoMax) / 2;
+    const halfRange = (range / 2) * (1 + padding * 2);
+    autoMin = center - halfRange / ampZoom;
+    autoMax = center + halfRange / ampZoom;
+
+    const yRange = autoMax - autoMin;
+
+    // 绘制波形
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+
+    const xScale = w / nTotal;
+    let first = true;
+
+    for (let i = 0; i < n; i++) {
+      const x = (nTotal - n + i) * xScale;
+      const y = h - ((display[i] - autoMin) / yRange) * h;
+      if (first) { ctx.moveTo(x, y); first = false; }
+      else       { ctx.lineTo(x, y); }
+    }
+
+    ctx.stroke();
+
+    // 绘制R峰标记（仅在去噪信号画布上）
+    if (label === 'Denoised' && lastRPeaks && lastRPeaks.indices && lastRPeaks.indices.length > 0) {
+      const bufLen = data.length;
+      const visibleStartIdx = bufLen - nTotal;
+      for (let pi = 0; pi < lastRPeaks.indices.length; pi++) {
+        const peakBufIdx = lastRPeaks.indices[pi];
+        const peakDisplayIdx = peakBufIdx - visibleStartIdx;
+        if (peakDisplayIdx >= 0 && peakDisplayIdx < n) {
+          const px = peakDisplayIdx * xScale;
+          const py = h - ((display[peakDisplayIdx] - autoMin) / yRange) * h;
+          ctx.beginPath();
+          ctx.arc(px, py, 5 * dpr, 0, 2 * Math.PI);
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.85)';
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+    }
+
+    // 绘制基线 (y=0)
+    if (autoMin < 0 && autoMax > 0) {
+      const yZero = h - ((0 - autoMin) / yRange) * h;
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4 * dpr, 4 * dpr]);
+      ctx.beginPath();
+      ctx.moveTo(0, yZero);
+      ctx.lineTo(w, yZero);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // ============================================================
+  // 主渲染循环
+  // ============================================================
+  let lastMetrics = {};
+  let lastRPeaks = null;
+
+  function render() {
+    const dpr = devicePixelRatio;
+
+    // 绘制原始信号（灰色）
+    drawWaveform(ctxRaw, rawData, '#64748b', null, null, 'Raw');
+
+    // 绘制去噪信号（亮绿色）
+    drawWaveform(ctxProc, procData, '#22c55e', null, null, 'Denoised');
+
+    document.getElementById('zoomDisplay').textContent = 
+        Math.round(ampZoom * 100) + '% / ' + Math.round(timeZoom * 100) + '%';
+
+    // 应用指标到 UI
+    const m = lastMetrics;
+    if (m.heart_rate !== undefined) {
+      hrDisplay.textContent = m.heart_rate > 0 ? m.heart_rate.toFixed(1) : '--';
+    }
+    if (m.peak_snr !== undefined) {
+      statSnr.textContent = m.peak_snr > 0 ? m.peak_snr.toFixed(1) : '--';
+      const methodName = m.method || 'batch...';
+      procLevel.textContent = `${methodName}  |  SNR: ${m.peak_snr > 0 ? m.peak_snr.toFixed(1) + ' dB' : '-'}`;
+    }
+    if (m.signal_level !== undefined) {
+      const levelText = m.signal_level.toFixed(3);
+      statLevel.textContent = levelText;
+      rawLevel.textContent = `RMS: ${levelText} mV`;
+    }
+    if (m.n_peaks !== undefined) {
+      statPeaks.textContent = m.n_peaks;
+    }
+    if (m.signal_alive !== undefined) {
+      statStatus.textContent = m.signal_alive ? '正常' : '静默';
+      statStatus.style.color = m.signal_alive ? 'var(--accent-green)' : 'var(--accent-red)';
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  // ============================================================
+  // SSE 连接
+  // ============================================================
+  let eventSource = null;
+
+  function connectSSE() {
+    if (eventSource) {
+      eventSource.close();
+    }
+
+    statusDot.className = 'status-dot offline';
+    statusText.textContent = '连接中...';
+
+    eventSource = new EventSource('/stream');
+
+    eventSource.onopen = function() {
+      statusDot.className = 'status-dot online';
+      statusText.textContent = '已连接';
+      procData.length = 0;  // 重连时清除旧数据
+    };
+
+    eventSource.onmessage = function(e) {
+      try {
+        const data = JSON.parse(e.data);
+
+        // 心跳包
+        if (data.ping) {
+          if (!data.running) {
+            statusDot.className = 'status-dot paused';
+            statusText.textContent = '流水线已停止';
+          }
+          return;
+        }
+
+        // 数据包
+        if (data.raw) {
+          pushRawData(rawData, data.raw);
+        }
+        // 仅当有新批次数据时才追加（实现滚动刷新）
+        if (data.proc && data.proc.length > 0) {
+          pushProcData(procData, data.proc);
+        }
+        if (data.metrics) {
+          lastMetrics = data.metrics;
+
+          // 更新当前方法显示
+          if (data.metrics.method) {
+            document.getElementById('currentMethodDisplay').textContent = data.metrics.method;
+          }
+        }
+        if (data.r_peaks && data.r_peaks.indices && data.r_peaks.indices.length > 0) {
+          lastRPeaks = data.r_peaks;
+        }
+
+        // 状态栏更新
+        if (data.t_start !== undefined && data.t_end !== undefined) {
+          const duration = data.t_end - data.t_start;
+          if (duration > 0) {
+            fpsDisplay.textContent = FS.toFixed(0);
+          }
+        }
+
+      } catch(err) {
+        console.error('SSE 数据解析错误:', err);
+      }
+    };
+
+    eventSource.onerror = function() {
+      statusDot.className = 'status-dot offline';
+      statusText.textContent = '连接断开，5秒后重连...';
+      eventSource.close();
+      setTimeout(connectSSE, 5000);
+    };
+  }
+
+  // ============================================================
+  // 定时拉取状态
+  // ============================================================
+  function pollStatus() {
+    fetch('/status')
+      .then(r => r.json())
+      .then(s => {
+        modeDisplay.textContent = s.mode || '-';
+        if (s.samples_received !== undefined) {
+          samplesDisplay.textContent = s.samples_received.toLocaleString();
+        }
+      })
+      .catch(() => {});
+    setTimeout(pollStatus, 3000);
+  }
+
+  // ============================================================
+  // 方法切换
+  // ============================================================
+  document.querySelectorAll('.method-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      const method = this.dataset.method;
+      fetch('/set_method', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: method }),
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === 'ok') {
+          document.querySelectorAll('.method-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.method === method);
+          });
+        }
+      })
+      .catch(err => console.error('方法切换失败:', err));
+    });
+  });
+
+  // ============================================================
+  // 启动
+  // ============================================================
+  resizeAll();
+
+  // 延迟确保 Canvas 尺寸正确
+  setTimeout(resizeAll, 100);
+
+  connectSSE();
+  pollStatus();
+  requestAnimationFrame(render);
+
+  console.log('ECG Monitor 已启动, 5s 可见窗口,', MAX_POINTS, '点');
+
+})();
+</script>
+</body>
+</html>
